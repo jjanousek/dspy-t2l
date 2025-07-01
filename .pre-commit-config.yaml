@@ -1,0 +1,20 @@
+repos:
+  # 1️⃣ Ruff lint first so it can auto-fix, then Ruff formatter
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.4.6 # pin!
+    hooks:
+      - id: ruff
+        args: [--fix]
+      - id: ruff-format
+
+  # 2️⃣ Black for final whitespace/line-length pass
+  - repo: https://github.com/psf/black
+    rev: 24.4.2
+    hooks: [{ id: black }]
+
+  # 3️⃣ isort (imports) – keep it last & use Black’s profile
+  - repo: https://github.com/pycqa/isort
+    rev: 6.0.1
+    hooks:
+      - id: isort
+        args: [--profile=black]
