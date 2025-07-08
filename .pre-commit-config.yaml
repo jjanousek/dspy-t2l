@@ -1,15 +1,15 @@
 repos:
   # 1️⃣ Ruff lint first so it can auto-fix, then Ruff formatter
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.4.6 # pin!
+    rev: v0.12.2 # pin!
     hooks:
       - id: ruff
         args: [--fix]
-      - id: ruff-format
+      # - id: ruff-format
 
   # 2️⃣ Black for final whitespace/line-length pass
   - repo: https://github.com/psf/black
-    rev: 24.4.2
+    rev: 25.1.0
     hooks: [{ id: black }]
 
   # 3️⃣ isort (imports) – keep it last & use Black’s profile

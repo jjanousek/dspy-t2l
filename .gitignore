@@ -82,6 +82,8 @@ target/
 
 # Jupyter Notebook
 .ipynb_checkpoints
+*.ipynb
+.jupyter/
 
 # IPython
 profile_default/
@@ -169,3 +171,10 @@ cython_debug/
 # .vscode/ 
 
 # .pre-commit-config.yaml
+
+# official_sakana_repo directory
+official_sakana_repo/
+official_sakana_repo/*
+
+trained_t2l/
+trained_t2l/*
