@@ -172,7 +172,7 @@ class TaskToLoRA(dspy.Module):
         self.peft_model.set_adapter(name)
 
     def export(self, task: str, dir_path: Path):
-        """Persist the adapter for *task* exactly like the Sakana demo."""
+        """Persist the adapter for task exactly like Sakana demo."""
         dir_path = Path(dir_path)
         dir_path.mkdir(parents=True, exist_ok=True)
         bundle = self._adapter_for(task)
@@ -184,7 +184,7 @@ class TaskToLoRA(dspy.Module):
     # ----------------------------------------------------------------------
     @torch.inference_mode()
     def forward(self, task_string: str):
-        """Return a LoRA adapter or model specialised for *task_string*."""
+        """Return a LoRA adapter or model specialised for task_string."""
         bundle = self._adapter_for(task_string)
 
         # Lightweight dict return remains the default

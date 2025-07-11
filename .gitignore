@@ -2,6 +2,11 @@
 context/
 context/*
 
+
+data/**
+# Keep Python scripts in data folder
+!data/**/*.py
+
 # Python
 # Byte-compiled / optimized / DLL files
 __pycache__/
