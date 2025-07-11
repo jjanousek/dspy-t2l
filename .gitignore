@@ -7,6 +7,9 @@ data/**
 # Keep Python scripts in data folder
 !data/**/*.py
 
+results/
+results/*
+
 # Python
 # Byte-compiled / optimized / DLL files
 __pycache__/
