@@ -9,7 +9,12 @@ import dspy
 import torch
 from hyper_llm_modulator.hyper_modulator import load_hypermod_checkpoint
 from hyper_llm_modulator.utils import embed_texts, get_layers
-from peft import PeftConfig, get_peft_config, get_peft_model
+from peft import (
+    PeftConfig,
+    get_peft_config,
+    get_peft_model,
+    set_peft_model_state_dict,
+)
 
 
 class TaskToLoRA(dspy.Module):
@@ -61,6 +66,7 @@ class TaskToLoRA(dspy.Module):
             self.pool,
         ) = load_hypermod_checkpoint(Path(hypermod_dir) / "hypermod.pt", self.device)
 
+        self.tokenizer = _bm_tok
         self.hypermod.eval().requires_grad_(False)
         # Ensure the base model itself is in eval mode for clarity
         self.base_model.eval()
@@ -155,17 +161,24 @@ class TaskToLoRA(dspy.Module):
             return name
 
         bundle = self._adapter_for(task)
+        self.apply_bundle(bundle, name=name)
+        return name
 
-        # The PEFT API expects a state-dict plus config when loading from
-        # memory.  We delegate the heavy lifting to ``load_adapter`` which
-        # will create the necessary modules if missing.
-        self.peft_model.load_adapter(  # type: ignore[arg-type]
-            bundle["state_dict"],
-            adapter_name=name,
-            adapter_cfg=copy.deepcopy(self._peft_cfg_template),
+    def apply_bundle(self, bundle: Dict[str, Any], name: str = "default"):
+        """Load the given adapter bundle into the internal PEFT model and activate it."""
+        peft_config = bundle["config"]
+        if not isinstance(peft_config, PeftConfig):
+            peft_config = PeftConfig.from_dict(peft_config)
+
+        if name not in self.peft_model.peft_config:
+            self.peft_model.add_adapter(name, peft_config)
+
+        # Load weights for the specified adapter and activate it
+        set_peft_model_state_dict(
+            self.peft_model, bundle["state_dict"], adapter_name=name
         )
         self.peft_model.set_adapter(name)
-        return name
+        return self.peft_model
 
     def set_adapter(self, name: str):
         """Activate an already-loaded adapter by name."""

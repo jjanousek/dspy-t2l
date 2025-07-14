@@ -19,9 +19,7 @@ import pandas as pd
 import torch
 from dspy.evaluate import Evaluate
 from dspy.teleprompt import BootstrapFewShot
-from peft import PeftConfig, get_peft_model
 from sacrebleu import sentence_bleu
-from transformers import AutoModelForCausalLM, AutoTokenizer
 
 try:
     # Use Sakana helper that attaches the correct chat_template for the model
@@ -235,36 +233,13 @@ def run_evaluation(args):
     else:
         raise ValueError(f"Unknown mode: {mode}")
 
-    # ------------------------- Load base model --------------------------------
-    if isinstance(adapter_bundle["config"], PeftConfig):
-        peft_config = adapter_bundle["config"]
-    else:
-        peft_config = PeftConfig.from_dict(adapter_bundle["config"])
-
-    base_model_id = peft_config.base_model_name_or_path
-
-    # Load tokenizer with chat template support when available
-    if get_tokenizer is not None:
-        tokenizer = get_tokenizer(base_model_id)
-    else:
-        tokenizer = AutoTokenizer.from_pretrained(base_model_id)
-
-    if tokenizer.pad_token_id is None:
-        tokenizer.pad_token_id = tokenizer.eos_token_id
-
-    base_model = AutoModelForCausalLM.from_pretrained(
-        base_model_id,
-        load_in_4bit=True,
-        device_map="auto",
-        torch_dtype=torch.bfloat16 if torch.cuda.is_available() else torch.float32,
-    )
-
-    # ------------------------ Apply PEFT adapter ------------------------------
-    peft_model = get_peft_model(base_model, peft_config)
-    peft_model.load_state_dict(adapter_bundle["state_dict"], strict=False)
+    # ------------------------ Apply adapter to existing model -----------------
+    # NOTE: We reuse the PEFT model from the TaskToLoRA instance to avoid loading
+    # a duplicate base model (saves significant GPU RAM).
+    peft_model = module.apply_bundle(adapter_bundle, name=f"{mode}_{task}")
 
     # -------------------- Wrap with custom DSPy LM ----------------------------
-    lm = HFLocalLM(peft_model, tokenizer, max_tokens=512)
+    lm = HFLocalLM(peft_model, module.tokenizer, max_tokens=512)
     dspy.settings.configure(lm=lm)
 
     # --------------------------- Build program --------------------------------
