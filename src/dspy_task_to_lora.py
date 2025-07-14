@@ -45,12 +45,14 @@ class TaskToLoRA(dspy.Module):
         device: str | torch.device = "cuda",
         cache_size: int = 32,
         return_model: bool = False,
+        seed: int | None = 42,
     ) -> None:
         super().__init__()
 
         self.device = torch.device(device)
         self.return_model = return_model
         self._max_cache = cache_size
+        self.seed = seed
 
         # ------------------------------------------------------------------
         # 1. Load checkpoint bundle exactly the way SakanaAI exports it
@@ -110,6 +112,12 @@ class TaskToLoRA(dspy.Module):
                 # Promote to most‑recent
                 self._cache[task] = self._cache.pop(task)
                 return self._cache[task]
+
+        # Set seed for deterministic generation; this is critical for tests
+        if self.seed is not None:
+            torch.manual_seed(self.seed)
+            if torch.cuda.is_available() and self.device.type == "cuda":
+                torch.cuda.manual_seed_all(self.seed)
 
         # 1. Embed the task description
         task_emb = embed_texts(

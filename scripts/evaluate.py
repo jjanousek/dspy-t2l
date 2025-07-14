@@ -12,9 +12,11 @@ and computes task-appropriate metrics. Outputs results as CSV and Markdown table
 
 import argparse
 import json
+import random
 from pathlib import Path
 
 import dspy
+import numpy as np
 import pandas as pd
 import torch
 from dspy.evaluate import Evaluate
@@ -192,6 +194,14 @@ def load_examples(file_path: Path) -> list[dspy.Example]:
 
 
 def run_evaluation(args):
+    # Set seed for reproducibility
+    if args.seed is not None:
+        random.seed(args.seed)
+        np.random.seed(args.seed)
+        torch.manual_seed(args.seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(args.seed)
+
     task = args.task
     mode = args.mode
     shots = args.shots
@@ -221,7 +231,7 @@ def run_evaluation(args):
     task_desc = task_descs[task]
 
     hypermod_dir = args.t2l_dir
-    module = TaskToLoRA(hypermod_dir, return_model=False)
+    module = TaskToLoRA(hypermod_dir, return_model=False, seed=args.seed)
 
     if mode == "generated":
         adapter_bundle = module.forward(task_desc)
@@ -237,9 +247,12 @@ def run_evaluation(args):
     # NOTE: We reuse the PEFT model from the TaskToLoRA instance to avoid loading
     # a duplicate base model (saves significant GPU RAM).
     peft_model = module.apply_bundle(adapter_bundle, name=f"{mode}_{task}")
+    peft_model.load_state_dict(adapter_bundle["state_dict"], strict=False)
 
     # -------------------- Wrap with custom DSPy LM ----------------------------
-    lm = HFLocalLM(peft_model, module.tokenizer, max_tokens=512)
+    lm = HFLocalLM(
+        peft_model, module.tokenizer, max_tokens=512, temperature=args.temperature
+    )
     dspy.settings.configure(lm=lm)
 
     # --------------------------- Build program --------------------------------
@@ -297,6 +310,18 @@ if __name__ == "__main__":
         type=int,
         default=0,
         help="Number of few-shot examples (0 for zero-shot)",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=42,
+        help="Random seed for reproducibility.",
+    )
+    parser.add_argument(
+        "--temperature",
+        type=float,
+        default=0.0,
+        help="Temperature for sampling. Set to 0.0 for deterministic output.",
     )
 
     # Limit the number of evaluation examples to speed up quick tests. Use -1 for all.
