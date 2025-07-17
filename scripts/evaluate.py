@@ -16,6 +16,7 @@ import random
 from pathlib import Path
 
 import dspy
+import mlflow
 import numpy as np
 import pandas as pd
 import torch
@@ -23,15 +24,19 @@ from dspy.evaluate import Evaluate
 from dspy.teleprompt import BootstrapFewShot
 from sacrebleu import sentence_bleu
 
+from src.dspy_task_to_lora import TaskToLoRA
+
+mlflow.dspy.autolog()
+
+mlflow.set_tracking_uri("http://127.0.0.1:5000")
+mlflow.set_experiment("evaluate")
+
 try:
     # Use Sakana helper that attaches the correct chat_template for the model
     from hyper_llm_modulator.utils.model_loading import get_tokenizer  # type: ignore
 except ImportError:
     # hyper_llm_modulator may not be installed in some environments; fall back to HF
     get_tokenizer = None  # type: ignore
-
-# Assuming TaskToLoRA is in src/ or importable
-from src.dspy_task_to_lora import TaskToLoRA  # Adjust path as per your repo
 
 
 # -----------------------------------------------------------------------------

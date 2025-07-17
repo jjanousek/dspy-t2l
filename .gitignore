@@ -186,3 +186,8 @@ official_sakana_repo/*
 
 trained_t2l/
 trained_t2l/*
+
+# Local artifacts and databases
+=2.18.0
+mlartifacts/
+mydb.sqlite
