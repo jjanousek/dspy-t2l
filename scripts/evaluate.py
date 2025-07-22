@@ -39,9 +39,6 @@ except ImportError:
     get_tokenizer = None  # type: ignore
 
 
-# -----------------------------------------------------------------------------
-# Custom LM class for local HF models (dspy.HFModel deprecated in latest DSPy)
-# -----------------------------------------------------------------------------
 class HFLocalLM(dspy.LM):
     """Custom DSPy LM provider for locally-loaded Hugging Face models."""
 
@@ -64,7 +61,6 @@ class HFLocalLM(dspy.LM):
         }
         self.history = []
 
-    # Internal generate helper -------------------------------------------------
     def _generate(self, prompt: str, max_tokens: int, **kwargs) -> str:
         # Apply chat template if available; otherwise fall back to raw prompt
         if getattr(self.tokenizer, "chat_template", None):
@@ -84,7 +80,6 @@ class HFLocalLM(dspy.LM):
         )
         return completion.strip()
 
-    # DSPy LM interface --------------------------------------------------------
     def basic_request(self, prompt: str, **kwargs):
         merged_kwargs = {**self.kwargs, **kwargs}
         response_text = self._generate(prompt, self.max_tokens, **merged_kwargs)
@@ -99,7 +94,6 @@ class HFLocalLM(dspy.LM):
         return_sorted: bool = False,
         **kwargs,
     ):
-        # DSPy expects LM.__call__(prompt=None, messages=None, **kwargs)
         if messages is not None and prompt is None:
             # Flatten chat messages into a single prompt string if provided as a list
             prompt = "\n".join([m.get("content", "") for m in messages])
@@ -113,9 +107,6 @@ class HFLocalLM(dspy.LM):
         return response
 
 
-# -----------------------------------------------------------------------------
-# DSPy signatures per task
-# -----------------------------------------------------------------------------
 class CodeGeneration(dspy.Signature):
     """Generate executable Python code to solve the problem."""
 
@@ -130,7 +121,6 @@ class MedicalQA(dspy.Signature):
     response: str = dspy.OutputField(desc="Single letter: A, B, C, or D")
 
 
-# Map tasks to signatures and metrics -----------------------------------------
 TASK_CONFIGS = {
     "code": {
         "signature": CodeGeneration,
@@ -143,8 +133,6 @@ TASK_CONFIGS = {
         "dataset_prefix": "medmcqa",
     },
 }
-
-# Metric functions -------------------------------------------------------------
 
 
 def exact_match_metric(example, pred, trace=None):
@@ -178,9 +166,6 @@ METRIC_FNS = {
 }
 
 
-# Utility ---------------------------------------------------------------------
-
-
 def load_examples(file_path: Path) -> list[dspy.Example]:
     """Load a JSONL file into a list of DSPy examples."""
     examples = []
@@ -193,9 +178,6 @@ def load_examples(file_path: Path) -> list[dspy.Example]:
                 )
             )
     return examples
-
-
-# Main evaluation --------------------------------------------------------------
 
 
 def run_evaluation(args):
@@ -214,7 +196,7 @@ def run_evaluation(args):
     config = TASK_CONFIGS[task]
     metric_fn = METRIC_FNS[config["metric"]]
 
-    # ------------------------------ Load data ---------------------------------
+    # load data
     data_dir = Path(f"data/{task}")
     train_path = data_dir / f"{config['dataset_prefix']}_train.jsonl"
     dev_path = data_dir / f"{config['dataset_prefix']}_dev.jsonl"
@@ -228,7 +210,7 @@ def run_evaluation(args):
     if getattr(args, "max_examples", -1) and args.max_examples > 0:
         dev_examples = dev_examples[: args.max_examples]
 
-    # ----------------------- Task-to-LoRA inference ---------------------------
+    # task-to-LoRA inference
     task_descs = {
         "code": "Generate Python code to solve math reasoning problems like those in GSM8K.",
         "medical": "Answer multiple-choice medical questions accurately.",
@@ -248,20 +230,20 @@ def run_evaluation(args):
     else:
         raise ValueError(f"Unknown mode: {mode}")
 
-    # ------------------------ Apply adapter to existing model -----------------
+    # apply adapter to existing model
     # NOTE: We reuse the PEFT model from the TaskToLoRA instance to avoid loading
-    # a duplicate base model (saves significant GPU RAM).
+    # a duplicate base model
     peft_model = module.apply_bundle(adapter_bundle, name=f"{mode}_{task}")
     peft_model.load_state_dict(adapter_bundle["state_dict"], strict=False)
 
-    # -------------------- Wrap with custom DSPy LM ----------------------------
+    # wrap with custom DSPy LM
     lm = HFLocalLM(
         peft_model, module.tokenizer, max_tokens=512, temperature=args.temperature
     )
     dspy.settings.configure(lm=lm)
 
-    # --------------------------- Build program --------------------------------
-    # Use a simple predictor instead of ChainOfThought to avoid JSON parsing issues
+    # build program
+    # use a simple predictor instead of ChainOfThought to avoid JSON parsing issues
     program = dspy.Predict(config["signature"])
 
     if shots > 0:
@@ -272,7 +254,7 @@ def run_evaluation(args):
     else:
         compiled_program = program
 
-    # ----------------------------- Evaluate -----------------------------------
+    # evaluate
     evaluator = Evaluate(
         devset=dev_examples,
         metric=metric_fn,
@@ -281,7 +263,7 @@ def run_evaluation(args):
     )
     score = evaluator(compiled_program)
 
-    # ------------------------------ Results -----------------------------------
+    # results
     results = {
         "task": task,
         "mode": mode,
@@ -299,9 +281,6 @@ def run_evaluation(args):
     print(pd.DataFrame([results]).to_markdown(index=False))
 
 
-# -----------------------------------------------------------------------------
-# Entry-point ------------------------------------------------------------------
-# -----------------------------------------------------------------------------
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Evaluate LoRA adapters with DSPy.")
     parser.add_argument(

@@ -1,4 +1,4 @@
-# dspy-t2l: Task-Adaptive LoRAs with DSPy
+# Task-Adaptive LoRAs with DSPy
 
 [![Paper](https://img.shields.io/badge/paper-2405.15043-B31B1B.svg)](https://arxiv.org/abs/2405.15043)
 [![GitHub](https://img.shields.io/badge/GitHub-SakanaAI/text--to--lora-blue?logo=github)](https://github.com/SakanaAI/text-to-lora)
