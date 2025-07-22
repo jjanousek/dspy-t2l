@@ -54,9 +54,6 @@ class TaskToLoRA(dspy.Module):
         self._max_cache = cache_size
         self.seed = seed
 
-        # ------------------------------------------------------------------
-        # 1. Load checkpoint bundle exactly the way SakanaAI exports it
-        # ------------------------------------------------------------------
         (
             _args,
             self.hypermod,
@@ -69,23 +66,20 @@ class TaskToLoRA(dspy.Module):
         ) = load_hypermod_checkpoint(Path(hypermod_dir) / "hypermod.pt", self.device)
 
         self.tokenizer = _bm_tok
+
         self.hypermod.eval().requires_grad_(False)
-        # Ensure the base model itself is in eval mode for clarity
         self.base_model.eval()
 
-        # ------------------------------------------------------------------
-        # 2.  Load *pristine* PEFT config and remember the base-model name
-        # ------------------------------------------------------------------
         cfg_json = Path(hypermod_dir) / "adapter_config.json"
         self._peft_cfg_template: PeftConfig = get_peft_config(
             PeftConfig.from_json_file(cfg_json)
         )
-        # Expose read-only copy for callers (e.g. eval script)
+        # expose read-only copy for callers
         self.peft_cfg: PeftConfig = self._peft_cfg_template
         self.base_model_id = self.peft_cfg.base_model_name_or_path
 
-        # Wrap the base model **once**, but hand PEFT its *own* copy so that
-        # mutations never propagate back to the template.
+        # wrap the base model once but hand PEFT its own copy so that
+        # mutations never propagate back to the template
         self.peft_model = get_peft_model(
             self.base_model, copy.deepcopy(self._peft_cfg_template)
         )
@@ -95,31 +89,24 @@ class TaskToLoRA(dspy.Module):
             len(get_layers(self.base_model)), dtype=torch.long, device=self.device
         )
 
-        # Tiny manual LRU because functools.lru_cache struggles with tensors
         self._cache: Dict[str, Dict[str, Any]] = {}
-        # Simple concurrency guard around cache operations
         self._cache_lock = threading.Lock()
 
-    # ----------------------------------------------------------------------
-    # Internal helper – NOT exported via DSPy
-    # ----------------------------------------------------------------------
     @torch.inference_mode()
     def _adapter_for(self, task: str) -> Dict[str, Any]:
-        """Generate (or retrieve) the LoRA adapter for *task*."""
+        """Generate (or retrieve) the LoRA adapter for task."""
 
         with self._cache_lock:
             if task in self._cache:
-                # Promote to most‑recent
                 self._cache[task] = self._cache.pop(task)
                 return self._cache[task]
 
-        # Set seed for deterministic generation; this is critical for tests
         if self.seed is not None:
             torch.manual_seed(self.seed)
             if torch.cuda.is_available() and self.device.type == "cuda":
                 torch.cuda.manual_seed_all(self.seed)
 
-        # 1. Embed the task description
+        # embed task description
         task_emb = embed_texts(
             [task],
             self.emb_model,
@@ -129,15 +116,11 @@ class TaskToLoRA(dspy.Module):
             device=self.device,
         )
 
-        # The hyper-network may include its own task encoder that projects the
-        # raw embedding (often 768/1024-d) down to the latent size it was
-        # trained with.  If such an encoder exists we must apply it so that
-        # the resulting vector matches the expected input dimension of the
-        # mixer MLP.
+        # project embedding via optional task encoder to match hyper-network's latent space.
         if getattr(self.hypermod, "task_encoder", None) is not None:
             task_emb = self.hypermod.task_encoder(task_emb)["encoded_task_emb"]
 
-        # 2. Hyper‑network → flat LoRA state‑dict
+        # lora state-dict
         lora_sd = self.hypermod.gen_lora(self._layer_idx, task_emb)
 
         bundle = {
@@ -145,25 +128,21 @@ class TaskToLoRA(dspy.Module):
             "config": copy.deepcopy(self._peft_cfg_template),
         }
 
-        # 3. Update LRU under lock
         with self._cache_lock:
             if len(self._cache) >= self._max_cache:
                 self._cache.pop(next(iter(self._cache)))
             self._cache[task] = bundle
         return bundle
 
-    # ----------------------------------------------------------------------
-    # Adapter management helpers (public)
-    # ----------------------------------------------------------------------
     def load_adapter(self, task: str, name: str):
-        """Generate the adapter for *task* and register it in *peft_model*.
+        """Generate the adapter for task and register it in peft_model.
 
-        If *name* already exists inside ``self.peft_model`` we simply
+        If name already exists inside self.peft_model we simply
         activate it; otherwise the freshly-generated weights are loaded
         under that name.
         """
 
-        # Already present → cheap context switch
+        # if present do cheap context switch
         if name in self.peft_model.peft_config:
             self.peft_model.set_adapter(name)
             return name
@@ -200,19 +179,14 @@ class TaskToLoRA(dspy.Module):
         torch.save(bundle["state_dict"], dir_path / "adapter_model.bin")
         bundle["config"].save_pretrained(dir_path)
 
-    # ----------------------------------------------------------------------
-    # DSPy‑facing API
-    # ----------------------------------------------------------------------
     @torch.inference_mode()
     def forward(self, task_string: str):
         """Return a LoRA adapter or model specialised for task_string."""
         bundle = self._adapter_for(task_string)
 
-        # Lightweight dict return remains the default
         if not self.return_model:
             return bundle
 
-        # Register (if necessary) and switch to the new adapter
         adapter_name = f"tmp_{len(self.peft_model.peft_config)}"
         self.load_adapter(task_string, adapter_name)
         return self.peft_model
