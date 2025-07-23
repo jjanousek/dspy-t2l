@@ -13,23 +13,22 @@ and computes task-appropriate metrics. Outputs results as CSV and Markdown table
 import argparse
 import json
 import random
+import re
 from pathlib import Path
 
 import dspy
-import mlflow
 import numpy as np
 import pandas as pd
 import torch
 from dspy.evaluate import Evaluate
 from dspy.teleprompt import BootstrapFewShot
-from sacrebleu import sentence_bleu
 
 from src.dspy_task_to_lora import TaskToLoRA
 
-mlflow.dspy.autolog()
+# mlflow.dspy.autolog()
 
-mlflow.set_tracking_uri("http://127.0.0.1:5000")
-mlflow.set_experiment("evaluate")
+# mlflow.set_tracking_uri("http://127.0.0.1:5000")
+# mlflow.set_experiment("evaluate")
 
 try:
     # Use Sakana helper that attaches the correct chat_template for the model
@@ -107,11 +106,13 @@ class HFLocalLM(dspy.LM):
         return response
 
 
-class CodeGeneration(dspy.Signature):
-    """Generate executable Python code to solve the problem."""
+class MathReasoning(dspy.Signature):
+    """Solve the math problem by showing your work step-by-step."""
 
     prompt: str = dspy.InputField()
-    response: str = dspy.OutputField(desc="Python code snippet")
+    response: str = dspy.OutputField(
+        desc="A detailed, step-by-step answer to the math problem, ending with '#### <answer>'."
+    )
 
 
 class MedicalQA(dspy.Signature):
@@ -122,10 +123,10 @@ class MedicalQA(dspy.Signature):
 
 
 TASK_CONFIGS = {
-    "code": {
-        "signature": CodeGeneration,
-        "metric": "bleu",  # BLEU for code similarity
-        "dataset_prefix": "gsm8k_code",
+    "gsm8k": {
+        "signature": MathReasoning,
+        "metric": "gsm8k_accuracy",
+        "dataset_prefix": "gsm8k",
     },
     "medical": {
         "signature": MedicalQA,
@@ -143,26 +144,42 @@ def exact_match_metric(example, pred, trace=None):
     return float(example.response.strip().upper() == pred.response.strip().upper())
 
 
-def bleu_metric(example, pred, trace=None):
-    """Sentence-level BLEU score scaled to 0-1, robust to empty predictions."""
-    # If prediction is missing we treat it as zero-quality output
-    if getattr(pred, "response", None) in (None, ""):
+def extract_gsm8k_answer(text: str | None) -> str | None:
+    """Extracts the final numerical answer from a GSM8K-style response."""
+    if text is None:
+        return None
+    # The final answer is typically after '####'
+    match = re.search(r"####\s*([\d,.-]+)", text)
+    if match:
+        answer = match.group(1).replace(",", "").strip()
+        # Handle cases like '.5' -> '0.5' and '5.' -> '5'
+        if answer.startswith("."):
+            answer = "0" + answer
+        if answer.endswith("."):
+            answer = answer[:-1]
+        return answer
+    return None
+
+
+def gsm8k_metric(example, pred, trace=None):
+    """Parses and compares the final numerical answer for GSM8K."""
+    pred_answer_str = getattr(pred, "response", None)
+    gold_answer_str = example.response
+
+    pred_answer = extract_gsm8k_answer(pred_answer_str)
+    gold_answer = extract_gsm8k_answer(gold_answer_str)
+
+    if pred_answer is None or gold_answer is None:
+        # If we can't parse either, it's a failure.
+        # This handles cases where the model doesn't follow the format.
         return 0.0
 
-    # Normalize whitespace to avoid spurious BLEU penalties
-    ref = " ".join(example.response.split()) if example.response else ""
-    hyp = " ".join(pred.response.split())
-
-    # If reference happens to be empty (should not occur), return 0
-    if ref == "" or hyp == "":
-        return 0.0
-
-    return sentence_bleu(hyp, [ref]).score / 100  # Scale to 0-1 range
+    return float(pred_answer == gold_answer)
 
 
 METRIC_FNS = {
     "accuracy": exact_match_metric,
-    "bleu": bleu_metric,
+    "gsm8k_accuracy": gsm8k_metric,
 }
 
 
@@ -212,7 +229,7 @@ def run_evaluation(args):
 
     # task-to-LoRA inference
     task_descs = {
-        "code": "Generate Python code to solve math reasoning problems like those in GSM8K.",
+        "gsm8k": "Solve grade-school math problems by showing your work step-by-step, ending with the final answer in the format '#### <number>'.",
         "medical": "Answer multiple-choice medical questions accurately.",
     }
     task_desc = task_descs[task]
@@ -287,7 +304,7 @@ if __name__ == "__main__":
         "--mode", choices=["generated", "trained"], required=True, help="Adapter mode"
     )
     parser.add_argument(
-        "--task", choices=["code", "medical"], required=True, help="Task to evaluate"
+        "--task", choices=["gsm8k", "medical"], required=True, help="Task to evaluate"
     )
     parser.add_argument(
         "--shots",

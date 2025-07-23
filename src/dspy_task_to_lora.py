@@ -172,7 +172,7 @@ class TaskToLoRA(dspy.Module):
         self.peft_model.set_adapter(name)
 
     def export(self, task: str, dir_path: Path):
-        """Persist the adapter for task exactly like Sakana demo."""
+        """saves lora adapter for given task."""
         dir_path = Path(dir_path)
         dir_path.mkdir(parents=True, exist_ok=True)
         bundle = self._adapter_for(task)
