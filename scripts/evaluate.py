@@ -237,26 +237,36 @@ def run_evaluation(args):
     hypermod_dir = args.t2l_dir
     module = TaskToLoRA(hypermod_dir, return_model=False, seed=args.seed)
 
-    if mode == "generated":
-        adapter_bundle = module.forward(task_desc)
-    elif mode == "trained":
-        artifact_path = Path(f"artifacts/{task}_trained.lora.pt")
-        if not artifact_path.exists():
-            raise FileNotFoundError(f"Trained adapter not found at {artifact_path}")
-        adapter_bundle = torch.load(artifact_path)
+    if mode == "baseline":
+        # Directly use the underlying base model from the TaskToLoRA checkpoint
+        lm = HFLocalLM(
+            module.base_model,
+            module.tokenizer,
+            max_tokens=512,
+            temperature=args.temperature,
+        )
     else:
-        raise ValueError(f"Unknown mode: {mode}")
+        if mode == "generated":
+            adapter_bundle = module.forward(task_desc)
+        elif mode == "trained":
+            artifact_path = Path(f"artifacts/{task}_trained.lora.pt")
+            if not artifact_path.exists():
+                raise FileNotFoundError(f"Trained adapter not found at {artifact_path}")
+            adapter_bundle = torch.load(artifact_path)
+        else:
+            raise ValueError(f"Unknown mode: {mode}")
 
-    # apply adapter to existing model
-    # NOTE: We reuse the PEFT model from the TaskToLoRA instance to avoid loading
-    # a duplicate base model
-    peft_model = module.apply_bundle(adapter_bundle, name=f"{mode}_{task}")
-    peft_model.load_state_dict(adapter_bundle["state_dict"], strict=False)
+        # apply adapter to existing model
+        # NOTE: We reuse the PEFT model from the TaskToLoRA instance to avoid loading
+        # a duplicate base model
+        peft_model = module.apply_bundle(adapter_bundle, name=f"{mode}_{task}")
+        peft_model.load_state_dict(adapter_bundle["state_dict"], strict=False)
 
-    # wrap with custom DSPy LM
-    lm = HFLocalLM(
-        peft_model, module.tokenizer, max_tokens=512, temperature=args.temperature
-    )
+        # wrap with custom DSPy LM
+        lm = HFLocalLM(
+            peft_model, module.tokenizer, max_tokens=512, temperature=args.temperature
+        )
+
     dspy.settings.configure(lm=lm)
 
     # build program
@@ -301,7 +311,10 @@ def run_evaluation(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Evaluate LoRA adapters with DSPy.")
     parser.add_argument(
-        "--mode", choices=["generated", "trained"], required=True, help="Adapter mode"
+        "--mode",
+        choices=["generated", "trained", "baseline"],
+        required=True,
+        help="Adapter mode ('baseline' runs without any LoRA)",
     )
     parser.add_argument(
         "--task", choices=["gsm8k", "medical"], required=True, help="Task to evaluate"
