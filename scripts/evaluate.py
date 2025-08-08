@@ -17,18 +17,19 @@ import re
 from pathlib import Path
 
 import dspy
+import mlflow
 import numpy as np
+import openai
 import pandas as pd
 import torch
-from dspy.evaluate import Evaluate
 from dspy.teleprompt import BootstrapFewShot
 
 from src.dspy_task_to_lora import TaskToLoRA
 
-# mlflow.dspy.autolog()
+mlflow.dspy.autolog()
 
-# mlflow.set_tracking_uri("http://127.0.0.1:5000")
-# mlflow.set_experiment("evaluate")
+mlflow.set_tracking_uri("http://127.0.0.1:5000")
+mlflow.set_experiment("evaluate")
 
 try:
     # Use Sakana helper that attaches the correct chat_template for the model
@@ -46,7 +47,7 @@ class HFLocalLM(dspy.LM):
         model,
         tokenizer,
         max_tokens: int = 512,
-        temperature: float = 0.7,
+        temperature: float = 0.0,
         top_p: float = 0.9,
     ):
         super().__init__(model="local_hf")
@@ -106,6 +107,61 @@ class HFLocalLM(dspy.LM):
         return response
 
 
+class OpenAIChatLM(dspy.LM):
+    # DSPy LM wrapper around OpenAI ChatCompletion API, shaped to mirror HFLocalLM.
+    def __init__(
+        self,
+        model_id: str = "o3",
+        max_tokens: int = 512,
+        temperature: float = 0.0,
+        top_p: float = 0.9,
+    ):
+        super().__init__(model=f"openai_{model_id}")
+        self.model_id = model_id
+        self.max_tokens = max_tokens
+        self.kwargs = {
+            "temperature": temperature,
+            "top_p": top_p,
+        }
+        self.history = []
+
+    def basic_request(
+        self, prompt: str | None = None, *, messages: list | None = None, **kwargs
+    ):
+        merged_kwargs = {**self.kwargs, **kwargs}
+        if messages is None:
+            # Fallback: wrap prompt in a single user message
+            if prompt is None:
+                raise ValueError("Either `prompt` or `messages` must be provided.")
+            messages = [{"role": "user", "content": prompt}]
+        response = openai.chat.completions.create(
+            model=self.model_id,
+            messages=messages,
+            max_tokens=self.max_tokens,
+            **merged_kwargs,
+        )
+        text = response.choices[0].message.content.strip()
+        return [{"role": "assistant", "content": text}]
+
+    def __call__(
+        self,
+        prompt: str | None = None,
+        *,
+        messages: list | None = None,
+        only_completed: bool = True,
+        return_sorted: bool = False,
+        **kwargs,
+    ):
+        if messages is None and prompt is None:
+            raise ValueError("Either `prompt` or `messages` must be provided.")
+
+        response = self.basic_request(prompt, messages=messages, **kwargs)
+        self.history.append({"prompt": prompt, "response": response, "kwargs": kwargs})
+        if only_completed:
+            return [r["content"] for r in response]
+        return response
+
+
 class MathReasoning(dspy.Signature):
     """Solve the math problem by showing your work step-by-step."""
 
@@ -144,37 +200,30 @@ def exact_match_metric(example, pred, trace=None):
     return float(example.response.strip().upper() == pred.response.strip().upper())
 
 
-def extract_gsm8k_answer(text: str | None) -> str | None:
-    """Extracts the final numerical answer from a GSM8K-style response."""
+def extract_gsm8k_answer(text: str | None) -> float | None:
+    """Extract the last number from text as a float."""
     if text is None:
         return None
-    # The final answer is typically after '####'
-    match = re.search(r"####\s*([\d,.-]+)", text)
-    if match:
-        answer = match.group(1).replace(",", "").strip()
-        # Handle cases like '.5' -> '0.5' and '5.' -> '5'
-        if answer.startswith("."):
-            answer = "0" + answer
-        if answer.endswith("."):
-            answer = answer[:-1]
-        return answer
-    return None
+
+    text = text.replace("\n", "")
+
+    matches = re.findall(r"\d*\.?\d+", text)
+    if not matches:
+        return None
+    try:
+        return float(matches[-1].replace(",", ""))
+    except ValueError:
+        return None
 
 
 def gsm8k_metric(example, pred, trace=None):
-    """Parses and compares the final numerical answer for GSM8K."""
-    pred_answer_str = getattr(pred, "response", None)
-    gold_answer_str = example.response
+    """Binary accuracy using numeric parsing."""
+    pred_val = extract_gsm8k_answer(getattr(pred, "response", None))
+    gold_val = extract_gsm8k_answer(example.response)
 
-    pred_answer = extract_gsm8k_answer(pred_answer_str)
-    gold_answer = extract_gsm8k_answer(gold_answer_str)
-
-    if pred_answer is None or gold_answer is None:
-        # If we can't parse either, it's a failure.
-        # This handles cases where the model doesn't follow the format.
+    if pred_val is None or gold_val is None:
         return 0.0
-
-    return float(pred_answer == gold_answer)
+    return float(pred_val == gold_val)
 
 
 METRIC_FNS = {
@@ -235,9 +284,20 @@ def run_evaluation(args):
     task_desc = task_descs[task]
 
     hypermod_dir = args.t2l_dir
-    module = TaskToLoRA(hypermod_dir, return_model=False, seed=args.seed)
 
-    if mode == "baseline":
+    # Only load the Hyper-LoRA stack when we actually need it. This avoids
+    # pulling the (large) base model weights into memory for the OpenAI path.
+    module = None  # type: ignore[assignment]
+    if mode != "openai":
+        module = TaskToLoRA(hypermod_dir, return_model=False, seed=args.seed)
+
+    if mode == "openai":
+        lm = OpenAIChatLM(
+            model_id="gpt-4o-mini",
+            max_tokens=512,
+            temperature=args.temperature,
+        )
+    elif mode == "baseline":
         # Directly use the underlying base model from the TaskToLoRA checkpoint
         lm = HFLocalLM(
             module.base_model,
@@ -281,38 +341,102 @@ def run_evaluation(args):
     else:
         compiled_program = program
 
-    # evaluate
-    evaluator = Evaluate(
-        devset=dev_examples,
-        metric=metric_fn,
-        num_threads=4,
-        display_progress=True,
-    )
-    score = evaluator(compiled_program)
+    # Evaluate per-example to compute metrics and log detailed outputs
+    class _PredWrapper:
+        def __init__(self, response: str | None):
+            self.response = response
 
-    # results
-    results = {
-        "task": task,
-        "mode": mode,
-        "shots": shots,
-        "score": score,
-        "metric": config["metric"],
-    }
+    per_example_rows: list[dict] = []
+    num_correct = 0
 
-    results_dir = Path("results")
-    results_dir.mkdir(exist_ok=True)
-    csv_path = results_dir / f"{task}_{mode}_{shots}shots.csv"
-    pd.DataFrame([results]).to_csv(csv_path, index=False)
+    # Start a top-level MLflow run so we can attach artifacts alongside traces
+    with mlflow.start_run(run_name=f"{task}_{mode}_{shots}shots"):
+        mlflow.log_params(
+            {
+                "task": task,
+                "mode": mode,
+                "shots": shots,
+                "temperature": args.temperature,
+                "max_examples": args.max_examples,
+                "metric": config["metric"],
+            }
+        )
 
-    print(f"Results saved to {csv_path}")
+        for idx, example in enumerate(dev_examples):
+            error_msg = ""
+            pred_text: str | None = None
+            try:
+                pred = compiled_program(prompt=example.prompt)
+                pred_text = getattr(pred, "response", None)
+            except Exception as e:  # defensive: record error and continue
+                error_msg = str(e)
+                pred = _PredWrapper(None)
+
+            # Compute parsed values and metric
+            if task == "gsm8k":
+                pred_parsed = extract_gsm8k_answer(pred_text)
+                gold_parsed = extract_gsm8k_answer(example.response)
+            else:
+                pred_parsed = (pred_text or "").strip()
+                gold_parsed = example.response.strip()
+
+            try:
+                metric_val = float(metric_fn(example, _PredWrapper(pred_text)))
+            except Exception:
+                metric_val = 0.0
+
+            num_correct += int(metric_val > 0.0)
+            per_example_rows.append(
+                {
+                    "index": idx,
+                    "prompt": example.prompt,
+                    "gold": example.response,
+                    "prediction": pred_text,
+                    "gold_parsed": gold_parsed,
+                    "pred_parsed": pred_parsed,
+                    "correct": metric_val,
+                    "error": error_msg,
+                }
+            )
+
+        score = num_correct / max(1, len(dev_examples))
+
+        # results
+        results = {
+            "task": task,
+            "mode": mode,
+            "shots": shots,
+            "score": score,
+            "metric": config["metric"],
+        }
+
+        results_dir = Path("results")
+        results_dir.mkdir(exist_ok=True)
+
+        summary_csv_path = results_dir / f"{task}_{mode}_{shots}shots.csv"
+        pd.DataFrame([results]).to_csv(summary_csv_path, index=False)
+
+        details_df = pd.DataFrame(per_example_rows)
+        # Put incorrect rows first for quick visibility
+        details_df_sorted = details_df.sort_values(["correct", "index"])  # 0s then 1s
+        details_csv_path = results_dir / f"{task}_{mode}_{shots}shots_details.csv"
+        details_df_sorted.to_csv(details_csv_path, index=False)
+
+        # Log to MLflow for convenient browsing
+        mlflow.log_metric("average_metric", score)
+        mlflow.log_artifact(str(summary_csv_path), artifact_path="results")
+        mlflow.log_artifact(str(details_csv_path), artifact_path="results")
+
+    print(f"Results saved to {summary_csv_path}")
     print(pd.DataFrame([results]).to_markdown(index=False))
+    print(f"Per-example details saved to {details_csv_path}")
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Evaluate LoRA adapters with DSPy.")
     parser.add_argument(
         "--mode",
-        choices=["generated", "trained", "baseline"],
+        choices=["generated", "trained", "baseline", "openai"],
         required=True,
         help="Adapter mode ('baseline' runs without any LoRA)",
     )

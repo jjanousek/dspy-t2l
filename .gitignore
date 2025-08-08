@@ -191,3 +191,7 @@ trained_t2l/*
 =2.18.0
 mlartifacts/
 mydb.sqlite
+ 
+# MLflow
+mlflow.db
+mlruns/
