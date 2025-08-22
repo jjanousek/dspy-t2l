@@ -2,6 +2,10 @@
 context/
 context/*
 
+# Claude configuration file
+CLAUDE.md
+AGENTS.md
+
 
 data/**
 # Keep Python scripts in data folder
