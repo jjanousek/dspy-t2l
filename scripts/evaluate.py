@@ -61,13 +61,27 @@ class HFLocalLM(dspy.LM):
         }
         self.history = []
 
-    def _generate(self, prompt: str, max_tokens: int, **kwargs) -> str:
-        # Apply chat template if available; otherwise fall back to raw prompt
-        if getattr(self.tokenizer, "chat_template", None):
+    def _generate(
+        self, prompt: str | None, messages: list | None, max_tokens: int, **kwargs
+    ) -> str:
+        # Use messages directly if provided with chat template
+        if messages is not None and getattr(self.tokenizer, "chat_template", None):
+            formatted_prompt = self.tokenizer.apply_chat_template(
+                messages, tokenize=False, add_generation_prompt=True
+            )
+        # Fall back to wrapping prompt as user message if chat template available
+        elif prompt is not None and getattr(self.tokenizer, "chat_template", None):
             messages = [{"role": "user", "content": prompt}]
-            prompt = self.tokenizer.apply_chat_template(messages, tokenize=False)
+            formatted_prompt = self.tokenizer.apply_chat_template(
+                messages, tokenize=False, add_generation_prompt=True
+            )
+        # No chat template available, use raw prompt
+        else:
+            formatted_prompt = prompt or ""
 
-        inputs = self.tokenizer(prompt, return_tensors="pt").to(self.hf_model.device)
+        inputs = self.tokenizer(formatted_prompt, return_tensors="pt").to(
+            self.hf_model.device
+        )
         with torch.inference_mode():
             outputs = self.hf_model.generate(
                 **inputs,
@@ -80,9 +94,13 @@ class HFLocalLM(dspy.LM):
         )
         return completion.strip()
 
-    def basic_request(self, prompt: str, **kwargs):
+    def basic_request(
+        self, prompt: str | None = None, *, messages: list | None = None, **kwargs
+    ):
         merged_kwargs = {**self.kwargs, **kwargs}
-        response_text = self._generate(prompt, self.max_tokens, **merged_kwargs)
+        response_text = self._generate(
+            prompt, messages, self.max_tokens, **merged_kwargs
+        )
         return [{"role": "assistant", "content": response_text}]
 
     def __call__(
@@ -94,14 +112,20 @@ class HFLocalLM(dspy.LM):
         return_sorted: bool = False,
         **kwargs,
     ):
-        if messages is not None and prompt is None:
-            # Flatten chat messages into a single prompt string if provided as a list
-            prompt = "\n".join([m.get("content", "") for m in messages])
-        elif prompt is None:
+        # Pass messages through to basic_request without flattening
+        if messages is not None:
+            response = self.basic_request(prompt=None, messages=messages, **kwargs)
+            self.history.append(
+                {"messages": messages, "response": response, "kwargs": kwargs}
+            )
+        elif prompt is not None:
+            response = self.basic_request(prompt=prompt, messages=None, **kwargs)
+            self.history.append(
+                {"prompt": prompt, "response": response, "kwargs": kwargs}
+            )
+        else:
             raise ValueError("Either `prompt` or `messages` must be provided.")
 
-        response = self.basic_request(prompt, **kwargs)
-        self.history.append({"prompt": prompt, "response": response, "kwargs": kwargs})
         if only_completed:
             return [r["content"] for r in response]
         return response
