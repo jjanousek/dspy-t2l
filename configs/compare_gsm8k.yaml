@@ -1,0 +1,19 @@
+name: gsm8k_base_lora
+shots: 0
+variants:
+  - name: base
+    mode: baseline
+    temperature: 0.0
+  - name: lora
+    mode: generated
+    temperature: 0.0
+
+# Examples of future variants you can add:
+#  - name: base_cot
+#    mode: baseline
+#    prompt:
+#      prefix: "Let's think step by step.\n"
+#  - name: lora_cot
+#    mode: generated
+#    prompt:
+#      prefix: "Let's think step by step.\n"

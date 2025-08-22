@@ -1,0 +1,33 @@
+name: gsm8k_base_lora_gepa
+shots: 0
+variants:
+  - name: base
+    mode: baseline
+    temperature: 0.0
+
+  - name: lora
+    mode: generated
+    temperature: 0.0
+
+  - name: base_gepa
+    mode: baseline
+    temperature: 0.0
+    tuner:
+      type: gepa
+      train_size: 256     # number of train examples to tune on
+      iters: 10           # optimization iterations
+      candidates: 8       # candidates per iteration
+      scope: prefix       # which string GEPA tunes (prefix/suffix/instructions)
+      judge: self         # or e.g., "openai:gpt-4o-mini"
+
+  - name: lora_gepa
+    mode: generated
+    temperature: 0.0
+    tuner:
+      type: gepa
+      train_size: 256
+      iters: 10
+      candidates: 8
+      scope: prefix
+      judge: self
+
