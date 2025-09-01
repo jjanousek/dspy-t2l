@@ -54,34 +54,24 @@ class HFLocalLM(dspy.LM):
         self.hf_model = model
         self.tokenizer = tokenizer
         self.max_tokens = max_tokens
-        self.kwargs = {
-            "temperature": temperature,
-            "top_p": top_p,
-            "do_sample": temperature > 0,
-        }
+        self.kwargs = {"do_sample": temperature > 0}
+        if temperature > 0:
+            self.kwargs.update({"temperature": temperature, "top_p": top_p})
         self.history = []
 
-    def _generate(
-        self, prompt: str | None, messages: list | None, max_tokens: int, **kwargs
-    ) -> str:
+    def _generate(self, prompt: str | None, messages: list | None, max_tokens: int, **kwargs) -> str:
         # Use messages directly if provided with chat template
         if messages is not None and getattr(self.tokenizer, "chat_template", None):
-            formatted_prompt = self.tokenizer.apply_chat_template(
-                messages, tokenize=False, add_generation_prompt=True
-            )
+            formatted_prompt = self.tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
         # Fall back to wrapping prompt as user message if chat template available
         elif prompt is not None and getattr(self.tokenizer, "chat_template", None):
             messages = [{"role": "user", "content": prompt}]
-            formatted_prompt = self.tokenizer.apply_chat_template(
-                messages, tokenize=False, add_generation_prompt=True
-            )
+            formatted_prompt = self.tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
         # No chat template available, use raw prompt
         else:
             formatted_prompt = prompt or ""
 
-        inputs = self.tokenizer(formatted_prompt, return_tensors="pt").to(
-            self.hf_model.device
-        )
+        inputs = self.tokenizer(formatted_prompt, return_tensors="pt").to(self.hf_model.device)
         with torch.inference_mode():
             outputs = self.hf_model.generate(
                 **inputs,
@@ -89,18 +79,12 @@ class HFLocalLM(dspy.LM):
                 pad_token_id=self.tokenizer.eos_token_id,
                 **kwargs,
             )
-        completion = self.tokenizer.decode(
-            outputs[0][len(inputs["input_ids"][0]) :], skip_special_tokens=True
-        )
+        completion = self.tokenizer.decode(outputs[0][len(inputs["input_ids"][0]) :], skip_special_tokens=True)
         return completion.strip()
 
-    def basic_request(
-        self, prompt: str | None = None, *, messages: list | None = None, **kwargs
-    ):
+    def basic_request(self, prompt: str | None = None, *, messages: list | None = None, **kwargs):
         merged_kwargs = {**self.kwargs, **kwargs}
-        response_text = self._generate(
-            prompt, messages, self.max_tokens, **merged_kwargs
-        )
+        response_text = self._generate(prompt, messages, self.max_tokens, **merged_kwargs)
         return [{"role": "assistant", "content": response_text}]
 
     def __call__(
@@ -115,14 +99,10 @@ class HFLocalLM(dspy.LM):
         # Pass messages through to basic_request without flattening
         if messages is not None:
             response = self.basic_request(prompt=None, messages=messages, **kwargs)
-            self.history.append(
-                {"messages": messages, "response": response, "kwargs": kwargs}
-            )
+            self.history.append({"messages": messages, "response": response, "kwargs": kwargs})
         elif prompt is not None:
             response = self.basic_request(prompt=prompt, messages=None, **kwargs)
-            self.history.append(
-                {"prompt": prompt, "response": response, "kwargs": kwargs}
-            )
+            self.history.append({"prompt": prompt, "response": response, "kwargs": kwargs})
         else:
             raise ValueError("Either `prompt` or `messages` must be provided.")
 
@@ -149,9 +129,7 @@ class OpenAIChatLM(dspy.LM):
         }
         self.history = []
 
-    def basic_request(
-        self, prompt: str | None = None, *, messages: list | None = None, **kwargs
-    ):
+    def basic_request(self, prompt: str | None = None, *, messages: list | None = None, **kwargs):
         merged_kwargs = {**self.kwargs, **kwargs}
         if messages is None:
             # Fallback: wrap prompt in a single user message
@@ -190,9 +168,7 @@ class MathReasoning(dspy.Signature):
     """Solve the math problem by showing your work step-by-step."""
 
     prompt: str = dspy.InputField()
-    response: str = dspy.OutputField(
-        desc="A detailed, step-by-step answer to the math problem, ending with '#### <answer>'."
-    )
+    response: str = dspy.OutputField()
 
 
 class MedicalQA(dspy.Signature):
@@ -262,11 +238,7 @@ def load_examples(file_path: Path) -> list[dspy.Example]:
     with open(file_path, "r") as f:
         for line in f:
             ex = json.loads(line)
-            examples.append(
-                dspy.Example(prompt=ex["prompt"], response=ex["response"]).with_inputs(
-                    "prompt"
-                )
-            )
+            examples.append(dspy.Example(prompt=ex["prompt"], response=ex["response"]).with_inputs("prompt"))
     return examples
 
 
@@ -302,7 +274,7 @@ def run_evaluation(args):
 
     # task-to-LoRA inference
     task_descs = {
-        "gsm8k": "Solve grade-school math problems by showing your work step-by-step, ending with the final answer in the format '#### <number>'.",
+        "gsm8k": "This task challenges your problem-solving abilities through mathematical reasoning. You must carefully read each scenario and systematically work through the data to compute the final outcome.",
         "medical": "Answer multiple-choice medical questions accurately.",
     }
     task_desc = task_descs[task]
@@ -331,7 +303,7 @@ def run_evaluation(args):
         )
     else:
         if mode == "generated":
-            adapter_bundle = module.forward(task_desc)
+            adapter_bundle = module(task_desc)
         elif mode == "trained":
             artifact_path = Path(f"artifacts/{task}_trained.lora.pt")
             if not artifact_path.exists():
@@ -344,12 +316,9 @@ def run_evaluation(args):
         # NOTE: We reuse the PEFT model from the TaskToLoRA instance to avoid loading
         # a duplicate base model
         peft_model = module.apply_bundle(adapter_bundle, name=f"{mode}_{task}")
-        peft_model.load_state_dict(adapter_bundle["state_dict"], strict=False)
 
         # wrap with custom DSPy LM
-        lm = HFLocalLM(
-            peft_model, module.tokenizer, max_tokens=512, temperature=args.temperature
-        )
+        lm = HFLocalLM(peft_model, module.tokenizer, max_tokens=512, temperature=args.temperature)
 
     dspy.settings.configure(lm=lm)
 
@@ -359,9 +328,7 @@ def run_evaluation(args):
 
     if shots > 0:
         optimizer = BootstrapFewShot(metric=metric_fn, max_bootstrapped_demos=shots)
-        compiled_program = optimizer.compile(
-            program, trainset=train_examples[: shots * 2]
-        )
+        compiled_program = optimizer.compile(program, trainset=train_examples[: shots * 2])
     else:
         compiled_program = program
 
@@ -464,9 +431,7 @@ if __name__ == "__main__":
         required=True,
         help="Adapter mode ('baseline' runs without any LoRA)",
     )
-    parser.add_argument(
-        "--task", choices=["gsm8k", "medical"], required=True, help="Task to evaluate"
-    )
+    parser.add_argument("--task", choices=["gsm8k", "medical"], required=True, help="Task to evaluate")
     parser.add_argument(
         "--shots",
         type=int,

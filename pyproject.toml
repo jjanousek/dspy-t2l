@@ -1,0 +1,54 @@
+[project]
+name = "text-to-lora"
+version = "0.0.1"
+authors = [{ name = "Rujikorn Charakorn" }]
+description = "The code repository for the paper 'Text-to-LoRA: Instant Transformer Adaption' (ICML 2025)."
+readme = "README.md"
+requires-python = ">=3.10,<3.11"
+dependencies = [
+    "transformers==4.46.2",
+    "huggingface_hub[cli]",
+    "peft",
+    "accelerate",
+    "datasets",
+    "bitsandbytes",
+    "jupyter",
+    "matplotlib",
+    "hf_transfer",
+    "torchmetrics",
+    "inflect",
+    "zstandard",
+    "pre-commit",
+    "trl",
+    "tensorboardX",
+    "wandb",
+    "fasttext-wheel",
+    "rouge-score",
+    "evalplus",
+    "gradio>=5.29.0",
+    # "vllm==0.5.4",  # Temporarily disabled due to pyairports dependency issue
+    "dspy-ai>=3.0.2",
+]
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.isort]
+profile = "black"
+
+
+[tool.black]
+line-length = 119
+
+[tool.pyright]
+exclude = ["train_outputs", "data", "outputs", "plots", "tmp", "wandb"]
+typeCheckingMode = "off"
+
+[tool.uv.sources]
+evalplus = { git = "https://github.com/evalplus/evalplus", rev = "1895d2f6aa8895044a7cf69defc24bd57695e885" }
+
+[dependency-groups]
+dev = [
+    "pytest",
+]

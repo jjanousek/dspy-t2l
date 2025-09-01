@@ -58,7 +58,7 @@ mlflow.set_experiment("compare")
 
 # Default task descriptions for Task-to-LoRA
 TASK_DESCS: Dict[str, str] = {
-    "gsm8k": "Solve grade-school math problems by showing your work step-by-step, ending with the final answer in the format '#### <number>'.",
+    "gsm8k": "This task challenges your problem-solving abilities through mathematical reasoning. You must carefully read each scenario and systematically work through the data to compute the final outcome.",
     "medical": "Answer multiple-choice medical questions accurately.",
 }
 
@@ -75,9 +75,7 @@ def set_seed(seed: int | None):
         torch.cuda.manual_seed_all(seed)
 
 
-def build_fixed_fewshot_prefix(
-    train_examples: List[dspy.Example], shots: int, *, seed: int | None = None
-) -> str:
+def build_fixed_fewshot_prefix(train_examples: List[dspy.Example], shots: int, *, seed: int | None = None) -> str:
     if shots <= 0:
         return ""
     # Deterministic subset (optionally shuffle by seed)
@@ -90,9 +88,7 @@ def build_fixed_fewshot_prefix(
     return "\n".join(lines).strip() + "\n\n"
 
 
-def compose_prompt(
-    base: str, prefix: str = "", suffix: str = "", fewshot: str = ""
-) -> str:
+def compose_prompt(base: str, prefix: str = "", suffix: str = "", fewshot: str = "") -> str:
     parts = []
     if prefix:
         parts.append(prefix)
@@ -129,12 +125,14 @@ def run_variant(
 
     # Instantiate LM for this variant
     if mode == "openai":
-        lm = OpenAIChatLM(
-            model_id="gpt-4o-mini", max_tokens=max_tokens, temperature=temperature
-        )
+        lm = OpenAIChatLM(model_id="gpt-4o-mini", max_tokens=max_tokens, temperature=temperature)
     elif mode == "baseline":
         if module is None:
             raise RuntimeError("Baseline requires a local TaskToLoRA module")
+        try:
+            module.base_model.set_adapter("default")
+        except Exception:
+            pass
         lm = HFLocalLM(
             module.base_model,
             module.tokenizer,
@@ -147,17 +145,14 @@ def run_variant(
         # Choose task description for adapter
         desc = adapter_task_desc or task_desc
         if mode == "generated":
-            adapter_bundle = module.forward(desc)
+            adapter_bundle = module(desc)
         else:
             artifact_path = Path(f"artifacts/{task}_trained.lora.pt")
             if not artifact_path.exists():
                 raise FileNotFoundError(f"Trained adapter not found at {artifact_path}")
             adapter_bundle = torch.load(artifact_path)
         peft_model = module.apply_bundle(adapter_bundle, name=f"{mode}_{task}")
-        peft_model.load_state_dict(adapter_bundle["state_dict"], strict=False)
-        lm = HFLocalLM(
-            peft_model, module.tokenizer, max_tokens=max_tokens, temperature=temperature
-        )
+        lm = HFLocalLM(peft_model, module.tokenizer, max_tokens=max_tokens, temperature=temperature)
     else:
         raise ValueError(f"Unknown mode: {mode}")
 
@@ -194,9 +189,7 @@ def run_variant(
     if shots > 0 and compiled_program is program:
         if fewshot_policy == "bootstrap":
             optimizer = BootstrapFewShot(metric=metric_fn, max_bootstrapped_demos=shots)
-            compiled_program = optimizer.compile(
-                program, trainset=train_examples[: shots * 2]
-            )
+            compiled_program = optimizer.compile(program, trainset=train_examples[: shots * 2])
         else:  # fixed
             fewshot_prefix = build_fixed_fewshot_prefix(train_examples, shots)
 
@@ -224,9 +217,7 @@ def run_variant(
             err = ""
             pred_text: str | None = None
             try:
-                prompt_text = compose_prompt(
-                    example.prompt, prefix=prefix, suffix=suffix, fewshot=fewshot_prefix
-                )
+                prompt_text = compose_prompt(example.prompt, prefix=prefix, suffix=suffix, fewshot=fewshot_prefix)
                 pred = compiled_program(prompt=prompt_text)
                 pred_text = getattr(pred, "response", None)
             except Exception as e:  # defensive: record and continue
@@ -282,9 +273,7 @@ def run_variant(
     return details_csv, score
 
 
-def aggregate(
-    outputs: Dict[str, Path], task: str, spec_name: str, shots: int, out_dir: Path
-):
+def aggregate(outputs: Dict[str, Path], task: str, spec_name: str, shots: int, out_dir: Path):
     variant_names = list(outputs.keys())
     if not variant_names:
         return
@@ -292,9 +281,7 @@ def aggregate(
     # Create a wide table by merging on index; carry prompt/gold from the first variant
     base_name = variant_names[0]
     df_base = pd.read_csv(outputs[base_name])
-    base_cols = [
-        c for c in ["index", "prompt", "gold", "gold_parsed"] if c in df_base.columns
-    ]
+    base_cols = [c for c in ["index", "prompt", "gold", "gold_parsed"] if c in df_base.columns]
     wide = df_base[base_cols].copy()
 
     for name in variant_names:
@@ -319,6 +306,9 @@ def aggregate(
 
     out_path = out_dir / f"{task}_{spec_name}_compare_{shots}shots.csv"
     wide.to_csv(out_path, index=False)
+
+    # Log aggregated comparison to MLflow
+    mlflow.log_artifact(str(out_path), artifact_path="results")
 
     # Console summary and analytics (enhanced visual formatting)
     total = len(wide)
@@ -351,17 +341,11 @@ def aggregate(
             b_correct_l_wrong = int(((wide[c1] == 1.0) & (wide[c2] == 0.0)).sum())
             l_correct_b_wrong = int(((wide[c1] == 0.0) & (wide[c2] == 1.0)).sum())
 
-            print(
-                f"{m1:<18} | acc={acc1:>6.2%}    correct={int(wide[c1].sum())}/{total}"
-            )
-            print(
-                f"{m2:<18} | acc={acc2:>6.2%}    correct={int(wide[c2].sum())}/{total}"
-            )
+            print(f"{m1:<18} | acc={acc1:>6.2%}    correct={int(wide[c1].sum())}/{total}")
+            print(f"{m2:<18} | acc={acc2:>6.2%}    correct={int(wide[c2].sum())}/{total}")
             print(sep)
             print(f"Δ accuracy: {acc2 - acc1:+.2%}")
-            print(
-                f"Agree: {agree} ({agree/total:.1%}) | Disagree: {disagree} ({disagree/total:.1%})"
-            )
+            print(f"Agree: {agree} ({agree/total:.1%}) | Disagree: {disagree} ({disagree/total:.1%})")
             print(f"  • {m1} correct, {m2} wrong: {b_correct_l_wrong}")
             print(f"  • {m2} correct, {m1} wrong: {l_correct_b_wrong}")
 
@@ -373,16 +357,8 @@ def aggregate(
                 print(" EXAMPLE DISAGREEMENTS (first 3) ".center(70, "═"))
                 print(bar)
                 # Prefer parsed predictions if available
-                p1p = (
-                    f"pred_parsed_{m1}"
-                    if f"pred_parsed_{m1}" in dis.columns
-                    else f"pred_{m1}"
-                )
-                p2p = (
-                    f"pred_parsed_{m2}"
-                    if f"pred_parsed_{m2}" in dis.columns
-                    else f"pred_{m2}"
-                )
+                p1p = f"pred_parsed_{m1}" if f"pred_parsed_{m1}" in dis.columns else f"pred_{m1}"
+                p2p = f"pred_parsed_{m2}" if f"pred_parsed_{m2}" in dis.columns else f"pred_{m2}"
                 gp = "gold_parsed" if "gold_parsed" in dis.columns else "gold"
                 for _, row in dis.head(3).iterrows():
                     prompt_snip = row.get("prompt", "") or ""
@@ -418,11 +394,9 @@ def aggregate(
                     )
                     .head(top_n)
                 )
-                top_path = (
-                    out_dir
-                    / f"{task}_{spec_name}_compare_{shots}shots_top_disagreements.csv"
-                )
+                top_path = out_dir / f"{task}_{spec_name}_compare_{shots}shots_top_disagreements.csv"
                 save_df.to_csv(top_path, index=False)
+                mlflow.log_artifact(str(top_path), artifact_path="results")
                 print("\nTop disagreements ->", top_path)
 
     print("\nAggregated comparison ->", out_path)
@@ -490,9 +464,7 @@ def _maybe_run_gepa(
     try:
         optimizer = GEPA_cls(**kwargs)
     except Exception as e:
-        warnings.warn(
-            f"Failed to initialize GEPA with kwargs {kwargs}: {e}", RuntimeWarning
-        )
+        warnings.warn(f"Failed to initialize GEPA with kwargs {kwargs}: {e}", RuntimeWarning)
         return program, None
 
     # Call compile with flexible arg names
@@ -528,9 +500,7 @@ def main():
     parser.add_argument("--t2l-dir", default=str(ROOT / "trained_t2l" / "gemma_2b_t2l"))
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--max-examples", type=int, default=-1)
-    parser.add_argument(
-        "--fewshot-policy", choices=["fixed", "bootstrap"], default="fixed"
-    )
+    parser.add_argument("--fewshot-policy", choices=["fixed", "bootstrap"], default="fixed")
     args = parser.parse_args()
 
     set_seed(args.seed)
@@ -556,9 +526,7 @@ def main():
         dev_examples = dev_examples[: args.max_examples]
 
     # Build a single TaskToLoRA for local modes
-    module: TaskToLoRA | None = TaskToLoRA(
-        args.t2l_dir, return_model=False, seed=args.seed
-    )
+    module: TaskToLoRA | None = TaskToLoRA(args.t2l_dir, return_model=False, seed=args.seed)
 
     results_dir = ROOT / "results"
     results_dir.mkdir(exist_ok=True)
@@ -592,14 +560,14 @@ def main():
             )
             outputs[name] = details_path
 
-    # After MLflow runs, aggregate into a single CSV
-    aggregate(
-        outputs,
-        task=task,
-        spec_name=spec_name,
-        shots=default_shots,
-        out_dir=results_dir,
-    )
+        # Aggregate results while still within MLflow context
+        aggregate(
+            outputs,
+            task=task,
+            spec_name=spec_name,
+            shots=default_shots,
+            out_dir=results_dir,
+        )
 
 
 if __name__ == "__main__":

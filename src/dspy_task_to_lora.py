@@ -1,20 +1,23 @@
 from __future__ import annotations
 
 import copy
+import re
 import threading
 from pathlib import Path
 from typing import Any, Dict
 
 import dspy
 import torch
-from hyper_llm_modulator.hyper_modulator import load_hypermod_checkpoint
-from hyper_llm_modulator.utils import embed_texts, get_layers
 from peft import (
     PeftConfig,
+    PeftModel,
     get_peft_config,
     get_peft_model,
     set_peft_model_state_dict,
 )
+
+from hyper_llm_modulator.hyper_modulator import load_hypermod_checkpoint
+from hyper_llm_modulator.utils import embed_texts, get_layers
 
 
 class TaskToLoRA(dspy.Module):
@@ -71,23 +74,20 @@ class TaskToLoRA(dspy.Module):
         self.base_model.eval()
 
         cfg_json = Path(hypermod_dir) / "adapter_config.json"
-        self._peft_cfg_template: PeftConfig = get_peft_config(
-            PeftConfig.from_json_file(cfg_json)
-        )
+        self._peft_cfg_template: PeftConfig = get_peft_config(PeftConfig.from_json_file(cfg_json))
         # expose read-only copy for callers
         self.peft_cfg: PeftConfig = self._peft_cfg_template
         self.base_model_id = self.peft_cfg.base_model_name_or_path
 
-        # wrap the base model once but hand PEFT its own copy so that
-        # mutations never propagate back to the template
-        self.peft_model = get_peft_model(
-            self.base_model, copy.deepcopy(self._peft_cfg_template)
-        )
+        # IMPORTANT: base_model from hypermod checkpoint is already a PeftModel
+        # with a "default" adapter. We should use it directly, not wrap it again.
+        if isinstance(self.base_model, PeftModel):
+            self.peft_model = self.base_model
+        else:
+            self.peft_model = get_peft_model(self.base_model, copy.deepcopy(self._peft_cfg_template))
 
         # Pre‑compute layer indices for the base model once
-        self._layer_idx = torch.arange(
-            len(get_layers(self.base_model)), dtype=torch.long, device=self.device
-        )
+        self._layer_idx = torch.arange(len(get_layers(self.base_model)), dtype=torch.long, device=self.device)
 
         self._cache: Dict[str, Dict[str, Any]] = {}
         self._cache_lock = threading.Lock()
@@ -161,9 +161,20 @@ class TaskToLoRA(dspy.Module):
             self.peft_model.add_adapter(name, peft_config)
 
         # Load weights for the specified adapter and activate it
-        set_peft_model_state_dict(
-            self.peft_model, bundle["state_dict"], adapter_name=name
-        )
+        state_dict = bundle["state_dict"]
+        # Normalize keys like "...lora_A.default.weight" -> "...lora_A.weight"
+        # so PEFT can correctly route them to the specified adapter name.
+        # Also convert dtypes to match the base model
+        normalized_sd: Dict[str, Any] = {}
+        model_dtype = next(self.base_model.parameters()).dtype
+        for k, v in state_dict.items():
+            new_k = re.sub(r"(\.lora_[AB])\.[^.]+(\.weight)$", r"\1\2", k)
+            # Convert to model's dtype if necessary
+            if v.dtype != model_dtype:
+                v = v.to(dtype=model_dtype)
+            normalized_sd[new_k] = v
+
+        set_peft_model_state_dict(self.peft_model, normalized_sd, adapter_name=name)
         self.peft_model.set_adapter(name)
         return self.peft_model
 
