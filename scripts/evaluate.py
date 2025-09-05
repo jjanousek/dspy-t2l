@@ -46,7 +46,7 @@ class HFLocalLM(dspy.LM):
         self,
         model,
         tokenizer,
-        max_tokens: int = 512,
+        max_tokens: int = 1024,
         temperature: float = 0.0,
         top_p: float = 0.9,
     ):
@@ -116,7 +116,7 @@ class OpenAIChatLM(dspy.LM):
     def __init__(
         self,
         model_id: str = "o3",
-        max_tokens: int = 512,
+        max_tokens: int = 1024,
         temperature: float = 0.0,
         top_p: float = 0.9,
     ):
@@ -201,13 +201,22 @@ def exact_match_metric(example, pred, trace=None):
 
 
 def extract_gsm8k_answer(text: str | None) -> float | None:
-    """Extract the last number from text as a float."""
+    """Extract numerical answer from GSM8K response, matching Sakana's method."""
     if text is None:
         return None
 
-    text = text.replace("\n", "")
+    # First look for answer after #### delimiter (Sakana's primary method)
+    if "####" in text:
+        after_delimiter = text.split("####")[-1].strip()
+        matches = re.findall(r"(-?\d+(?:,\d+)*(?:\.\d+)?)", after_delimiter)
+        if matches:
+            try:
+                return float(matches[0].replace(",", ""))
+            except ValueError:
+                pass
 
-    matches = re.findall(r"\d*\.?\d+", text)
+    # Fallback: extract the last number in the response
+    matches = re.findall(r"(-?\d+(?:,\d+)*(?:\.\d+)?)", text)
     if not matches:
         return None
     try:
@@ -262,12 +271,11 @@ def run_evaluation(args):
     data_dir = Path(f"data/{task}")
     train_path = data_dir / f"{config['dataset_prefix']}_train.jsonl"
     dev_path = data_dir / f"{config['dataset_prefix']}_dev.jsonl"
-    # test_path = (
-    #     data_dir / f"{config['dataset_prefix']}_test.jsonl"
-    # )  # not used by default
+    test_path = data_dir / f"{config['dataset_prefix']}_test.jsonl"
 
     train_examples = load_examples(train_path)
-    dev_examples = load_examples(dev_path)
+    # Prefer full test set if available, else fall back to dev
+    dev_examples = load_examples(test_path) if test_path.exists() else load_examples(dev_path)
     # Optionally limit the number of evaluation examples for faster debugging
     if getattr(args, "max_examples", -1) and args.max_examples > 0:
         dev_examples = dev_examples[: args.max_examples]
@@ -290,7 +298,7 @@ def run_evaluation(args):
     if mode == "openai":
         lm = OpenAIChatLM(
             model_id="gpt-4o-mini",
-            max_tokens=512,
+            max_tokens=args.max_tokens,
             temperature=args.temperature,
         )
     elif mode == "baseline":
@@ -298,7 +306,7 @@ def run_evaluation(args):
         lm = HFLocalLM(
             module.base_model,
             module.tokenizer,
-            max_tokens=512,
+            max_tokens=args.max_tokens,
             temperature=args.temperature,
         )
     else:
@@ -318,7 +326,7 @@ def run_evaluation(args):
         peft_model = module.apply_bundle(adapter_bundle, name=f"{mode}_{task}")
 
         # wrap with custom DSPy LM
-        lm = HFLocalLM(peft_model, module.tokenizer, max_tokens=512, temperature=args.temperature)
+        lm = HFLocalLM(peft_model, module.tokenizer, max_tokens=args.max_tokens, temperature=args.temperature)
 
     dspy.settings.configure(lm=lm)
 
@@ -449,6 +457,12 @@ if __name__ == "__main__":
         type=float,
         default=0.0,
         help="Temperature for sampling. Set to 0.0 for deterministic output.",
+    )
+    parser.add_argument(
+        "--max_tokens",
+        type=int,
+        default=1024,
+        help="Max new tokens to generate per example.",
     )
 
     # Limit the number of evaluation examples to speed up quick tests. Use -1 for all.

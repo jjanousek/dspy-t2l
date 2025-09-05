@@ -1,0 +1,15 @@
+name: gsm8k_sakana_parity
+shots: 3  # Match Sakana's 3-shot ICL
+variants:
+  - name: base_3shot
+    mode: baseline
+    temperature: 0.0
+    shots: 3
+    max_tokens: 1024
+  - name: lora_3shot
+    mode: generated
+    temperature: 0.0
+    shots: 3
+    max_tokens: 1024
+    # Exact task description from Sakana
+    adapter_task_desc: "This task challenges your problem-solving abilities through mathematical reasoning. You must carefully read each scenario and systematically work through the data to compute the final outcome."

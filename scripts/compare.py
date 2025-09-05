@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import inspect
+import json
 import sys
 import warnings
 from pathlib import Path
@@ -49,6 +50,7 @@ from scripts.evaluate import (  # type: ignore
     load_examples,
 )
 from src.dspy_task_to_lora import TaskToLoRA
+from src.sakana_chat_program import SakanaChatProgram
 
 # Match evaluate.py logging behavior
 mlflow.dspy.autolog()
@@ -61,6 +63,27 @@ TASK_DESCS: Dict[str, str] = {
     "gsm8k": "This task challenges your problem-solving abilities through mathematical reasoning. You must carefully read each scenario and systematically work through the data to compute the final outcome.",
     "medical": "Answer multiple-choice medical questions accurately.",
 }
+
+# Fixed, hardcoded ICL demos used by Sakana for GSM8K
+SAKANA_GSM8K_ICL = (
+    "Here are some examples of the tasks you will be asked to solve.\n\n"
+    "## Example 1\n"
+    "Question: Natalia sold clips to 48 of her friends in April, and then she sold half as many clips in May. How many clips did Natalia sell altogether in April and May?\n\n"
+    "Answer: Natalia sold 48/2 = <<48/2=24>>24 clips in May.\n"
+    "Natalia sold 48+24 = <<48+24=72>>72 clips altogether in April and May.\n"
+    "#### 72\n\n"
+    "## Example 2\n"
+    "Question: Weng earns $12 an hour for babysitting. Yesterday, she just did 50 minutes of babysitting. How much did she earn?\n\n"
+    "Answer: Weng earns 12/60 = $<<12/60=0.2>>0.2 per minute.\n"
+    "Working 50 minutes, she earned 0.2 x 50 = $<<0.2*50=10>>10.\n"
+    "#### 10\n\n"
+    "## Example 3\n"
+    "Question: Betty is saving money for a new wallet which costs $100. Betty has only half of the money she needs. Her parents decided to give her $15 for that purpose, and her grandparents twice as much as her parents. How much more money does Betty need to buy the wallet?\n\n"
+    "Answer: In the beginning, Betty has only 100 / 2 = $<<100/2=50>>50.\n"
+    "Betty's grandparents gave her 15 * 2 = $<<15*2=30>>30.\n"
+    "This means, Betty needs 100 - 50 - 30 - 15 = $<<100-50-30-15=5>>5 more.\n"
+    "#### 5\n\n"
+)
 
 
 def set_seed(seed: int | None):
@@ -75,16 +98,25 @@ def set_seed(seed: int | None):
         torch.cuda.manual_seed_all(seed)
 
 
-def build_fixed_fewshot_prefix(train_examples: List[dspy.Example], shots: int, *, seed: int | None = None) -> str:
+def build_fixed_fewshot_prefix(
+    task: str, train_examples: List[dspy.Example], shots: int, *, seed: int | None = None
+) -> str:
     if shots <= 0:
         return ""
+    # Sakana uses a fixed, hardcoded set of 3 ICL examples for GSM8K
+    if task == "gsm8k":
+        return SAKANA_GSM8K_ICL
     # Deterministic subset (optionally shuffle by seed)
     idxs = list(range(min(shots, len(train_examples))))
-    lines: List[str] = ["Here are some examples:"]
+    lines: List[str] = ["Here are some examples of the tasks you will be asked to solve."]
     for i in idxs:
         ex = train_examples[i]
-        lines.append(f"Q{i+1}: {ex.prompt}\nA{i+1}: {ex.response}\n")
-    lines.append("Now answer the following question:")
+        # Remove leading helper text if present
+        q = ex.prompt
+        prefix = "Please answer the following question:"
+        if isinstance(q, str) and q.strip().startswith(prefix):
+            q = q.strip()[len(prefix) :].strip()
+        lines.append(f"## Example {i+1}\n" f"Question: {q}\n\n" f"Answer: {ex.response}\n")
     return "\n".join(lines).strip() + "\n\n"
 
 
@@ -123,6 +155,9 @@ def run_variant(
     prefix: str = prompt_cfg.get("prefix", "")
     suffix: str = prompt_cfg.get("suffix", "")
 
+    # Per-variant max tokens (default 1024 to match Sakana)
+    max_tokens = int(variant.get("max_tokens", 1024))
+
     # Instantiate LM for this variant
     if mode == "openai":
         lm = OpenAIChatLM(model_id="gpt-4o-mini", max_tokens=max_tokens, temperature=temperature)
@@ -159,10 +194,19 @@ def run_variant(
     dspy.settings.configure(lm=lm)
 
     signature = TASK_CONFIGS[task]["signature"]
+    # Default program: signature-based Predict (may inject ChatAdapter wrappers)
     program = dspy.Predict(signature)
 
+    # Prefer Sakana-style chat program for GSM8K to avoid structured wrappers
+    if task == "gsm8k":
+        program = SakanaChatProgram(
+            icl_block=SAKANA_GSM8K_ICL,
+            include_icl=shots > 0,
+            prefix=prefix,
+            suffix=suffix,
+        )
+
     compiled_program = program
-    fewshot_prefix = ""
 
     # Optional tuner: GEPA prompt optimization
     tuner_cfg: Dict[str, Any] | None = variant.get("tuner")
@@ -187,11 +231,11 @@ def run_variant(
 
     # Few-shot handling if no tuner or in addition to tuner
     if shots > 0 and compiled_program is program:
-        if fewshot_policy == "bootstrap":
+        # For GSM8K parity we already embed fixed ICL via SakanaChatProgram.
+        # Only use BootstrapFewShot for non-GSM8K tasks or when not using Sakana program.
+        if fewshot_policy == "bootstrap" and task != "gsm8k":
             optimizer = BootstrapFewShot(metric=metric_fn, max_bootstrapped_demos=shots)
             compiled_program = optimizer.compile(program, trainset=train_examples[: shots * 2])
-        else:  # fixed
-            fewshot_prefix = build_fixed_fewshot_prefix(train_examples, shots)
 
     class _PredWrapper:
         def __init__(self, response: str | None):
@@ -199,6 +243,8 @@ def run_variant(
 
     rows: List[Dict[str, Any]] = []
     num_correct = 0
+    prompt_logs: List[Dict[str, Any]] = []
+    prompt_csv_rows: List[Dict[str, Any]] = []
 
     # Create an MLflow run for the variant
     with mlflow.start_run(run_name=f"{task}_{name}_{shots}shots", nested=True):
@@ -217,8 +263,64 @@ def run_variant(
             err = ""
             pred_text: str | None = None
             try:
-                prompt_text = compose_prompt(example.prompt, prefix=prefix, suffix=suffix, fewshot=fewshot_prefix)
-                pred = compiled_program(prompt=prompt_text)
+                # With SakanaChatProgram, pass the raw dataset prompt; it will format messages.
+                # For default Predict program, we still pass a composed flat prompt.
+                if isinstance(program, SakanaChatProgram):
+                    # Build messages and record the fully formatted prompt
+                    messages = program.build_messages(example.prompt)
+                    # Access current LM for chat_template formatting, if available
+                    lm_obj = dspy.settings.lm
+                    formatted_prompt = None
+                    try:
+                        tok = getattr(lm_obj, "tokenizer", None)
+                        if tok is not None and getattr(tok, "chat_template", None):
+                            formatted_prompt = tok.apply_chat_template(
+                                messages, tokenize=False, add_generation_prompt=True
+                            )
+                    except Exception:
+                        formatted_prompt = None
+
+                    pred = compiled_program(prompt=example.prompt)
+                    prompt_text = example.prompt  # store raw in per-example CSV
+
+                    # Append prompt log entry
+                    prompt_logs.append({"index": idx, "messages": messages, "formatted": formatted_prompt})
+                    # Prepare CSV-friendly row
+                    try:
+                        system_content = next(
+                            (m.get("content", "") for m in messages if m.get("role") == "system"), ""
+                        )
+                        user_content = next((m.get("content", "") for m in messages if m.get("role") == "user"), "")
+                    except Exception:
+                        system_content, user_content = "", ""
+                    prompt_csv_rows.append(
+                        {
+                            "index": idx,
+                            "system_content": system_content,
+                            "user_content": user_content,
+                            "flat_prompt": "",
+                            "formatted": formatted_prompt or "",
+                        }
+                    )
+                else:
+                    # Legacy flat prompt path
+                    fewshot_prefix = (
+                        build_fixed_fewshot_prefix(task, train_examples, shots)
+                        if (shots > 0 and fewshot_policy == "fixed")
+                        else ""
+                    )
+                    prompt_text = compose_prompt(example.prompt, prefix=prefix, suffix=suffix, fewshot=fewshot_prefix)
+                    pred = compiled_program(prompt=prompt_text)
+                    prompt_logs.append({"index": idx, "flat_prompt": prompt_text})
+                    prompt_csv_rows.append(
+                        {
+                            "index": idx,
+                            "system_content": "",
+                            "user_content": "",
+                            "flat_prompt": prompt_text,
+                            "formatted": "",
+                        }
+                    )
                 pred_text = getattr(pred, "response", None)
             except Exception as e:  # defensive: record and continue
                 err = str(e)
@@ -268,6 +370,20 @@ def run_variant(
         mlflow.log_metric("average_metric", score)
         mlflow.log_artifact(str(summary_csv), artifact_path="results")
         mlflow.log_artifact(str(details_csv), artifact_path="results")
+
+        # Log all prompts as JSONL and CSV artifacts for inspection
+        try:
+            prompts_path = out_dir / f"{task}_{name}_{shots}shots_prompts.jsonl"
+            with prompts_path.open("w", encoding="utf-8") as f:
+                for rec in prompt_logs:
+                    f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+            mlflow.log_artifact(str(prompts_path), artifact_path="results")
+            # CSV version for easier preview in MLflow UI
+            prompts_csv_path = out_dir / f"{task}_{name}_{shots}shots_prompts.csv"
+            pd.DataFrame(prompt_csv_rows).to_csv(prompts_csv_path, index=False)
+            mlflow.log_artifact(str(prompts_csv_path), artifact_path="results")
+        except Exception:
+            pass
 
     print(f"[{name}] acc={score:.3f}; details -> {details_csv}")
     return details_csv, score
@@ -519,9 +635,10 @@ def main():
 
     data_dir = ROOT / "data" / task
     train_path = data_dir / f"{config['dataset_prefix']}_train.jsonl"
-    dev_path = data_dir / f"{config['dataset_prefix']}_dev.jsonl"
+    test_path = data_dir / f"{config['dataset_prefix']}_test.jsonl"
+    dev_path = data_dir / f"{config['dataset_prefix']}_dev.jsonl"  # fallback
     train_examples = load_examples(train_path)
-    dev_examples = load_examples(dev_path)
+    dev_examples = load_examples(test_path) if test_path.exists() else load_examples(dev_path)
     if args.max_examples and args.max_examples > 0:
         dev_examples = dev_examples[: args.max_examples]
 
